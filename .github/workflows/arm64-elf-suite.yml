@@ -1,0 +1,142 @@
+name: Build and Decompile ARM64 ELFs
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_path:
+        description: Repository source directory used when no archive is supplied
+        required: true
+        default: sample
+      archive_path:
+        description: ZIP/TAR path committed in this repository (optional)
+        required: false
+        default: ""
+      archive_url:
+        description: Public HTTPS ZIP/TAR URL (optional)
+        required: false
+        default: ""
+      android_api:
+        description: Android API level for the Bionic executable
+        required: true
+        default: "30"
+  push:
+    branches: [main]
+    paths:
+      - sample/**
+      - scripts/**
+      - .github/workflows/arm64-elf-suite.yml
+
+permissions:
+  contents: read
+
+jobs:
+  build-analyze:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      NDK_VERSION: 27.2.12479018
+      GHIDRA_API: https://api.github.com/repos/NationalSecurityAgency/ghidra/releases/latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install native and cross-analysis tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            binutils-aarch64-linux-gnu \
+            gcc-aarch64-linux-gnu \
+            file jq unzip python3 openjdk-21-jdk-headless qemu-user
+
+      - name: Install Zig for static musl target
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.13.0
+
+      - name: Install Android SDK command line tools
+        uses: android-actions/setup-android@v3
+
+      - name: Install pinned Android NDK
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "ndk;${NDK_VERSION}"
+          echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Download latest official Ghidra release
+        run: |
+          asset_url=$(curl --fail --silent --show-error --location "$GHIDRA_API" \
+            | jq -r '.assets[] | select(.name | test("^ghidra_[0-9.]+_PUBLIC_.*\\.zip$")) | .browser_download_url' \
+            | head -n1)
+          test -n "$asset_url"
+          curl --fail --show-error --location --retry 5 "$asset_url" -o "$RUNNER_TEMP/ghidra.zip"
+          unzip -q "$RUNNER_TEMP/ghidra.zip" -d "$RUNNER_TEMP/ghidra"
+          ghidra_root=$(find "$RUNNER_TEMP/ghidra" -mindepth 1 -maxdepth 1 -type d | head -n1)
+          test -x "$ghidra_root/support/analyzeHeadless"
+          echo "GHIDRA_ROOT=$ghidra_root" >> "$GITHUB_ENV"
+          sha256sum "$RUNNER_TEMP/ghidra.zip"
+
+      - name: Prepare selected source package
+        run: |
+          python3 scripts/prepare_source.py \
+            --repository "$GITHUB_WORKSPACE" \
+            --source-path '${{ inputs.source_path || 'sample' }}' \
+            --archive-path '${{ inputs.archive_path }}' \
+            --archive-url '${{ inputs.archive_url }}' \
+            --output "$RUNNER_TEMP/source"
+
+      - name: Build debug, release, stripped and symbol ELFs
+        run: |
+          mkdir -p out/binaries
+          for target in linux-glibc linux-musl-static android-bionic; do
+            python3 scripts/build.py \
+              --source "$RUNNER_TEMP/source" \
+              --output "out/binaries/$target" \
+              --target "$target" \
+              --android-api '${{ inputs.android_api || '30' }}'
+          done
+
+      - name: Verify AArch64 ELF identity
+        run: |
+          for binary in out/binaries/*/*-debug out/binaries/*/*-release out/binaries/*/*.stripped; do
+            file "$binary"
+            aarch64-linux-gnu-readelf -h "$binary" | tee "$RUNNER_TEMP/header.txt"
+            grep -q 'Class:.*ELF64' "$RUNNER_TEMP/header.txt"
+            grep -q 'Machine:.*AArch64' "$RUNNER_TEMP/header.txt"
+          done
+          file out/binaries/linux-musl-static/*.stripped | grep -q 'statically linked'
+          aarch64-linux-gnu-readelf -l out/binaries/android-bionic/*-release | grep -q 'Requesting program interpreter: /system/bin/linker64'
+
+      - name: Execute Linux targets with QEMU
+        run: |
+          glibc=$(find out/binaries/linux-glibc -name '*-debug' -type f)
+          musl=$(find out/binaries/linux-musl-static -name '*-debug' -type f)
+          qemu-aarch64 -L /usr/aarch64-linux-gnu "$glibc" | tee out/binaries/linux-glibc/execution.txt
+          qemu-aarch64 "$musl" | tee out/binaries/linux-musl-static/execution.txt
+
+      - name: Decompile and analyze every executable variant
+        run: |
+          for target_dir in out/binaries/*; do
+            target=$(basename "$target_dir")
+            for binary in "$target_dir"/*-debug "$target_dir"/*-release "$target_dir"/*.stripped; do
+              variant=$(basename "$binary")
+              bash scripts/analyze.sh "$binary" "out/analysis/$target/$variant" "$GHIDRA_ROOT"
+            done
+          done
+
+      - name: Create manifest and checksums
+        run: |
+          python3 scripts/report.py out
+          find out -type f -not -name SHA256SUMS -print0 \
+            | sort -z \
+            | xargs -0 sha256sum > out/SHA256SUMS
+
+      - name: Upload complete ARM64 ELF suite
+        uses: actions/upload-artifact@v4
+        with:
+          name: arm64-elf-suite-${{ github.run_number }}
+          path: out/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 6
+
