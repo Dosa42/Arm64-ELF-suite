@@ -1,0 +1,122 @@
+name: Decompile Vendor ELF Batch
+
+on:
+  workflow_dispatch:
+    inputs:
+      vendor_zip_url:
+        description: HTTPS URL for vendor-a32.zip
+        required: true
+      vendor_zip_sha256:
+        description: Expected input SHA-256
+        required: true
+        default: b076a1415c79eca0470617e8fdd5f78858e4774cb5c52875e959cd01579079ba
+      checkpoint_url:
+        description: Optional HTTPS URL for prior result checkpoint tar.gz
+        required: false
+        default: ""
+      shard_count:
+        description: Number of parallel deterministic shards
+        type: choice
+        required: true
+        default: "64"
+        options: ["16", "32", "64", "96", "128"]
+      parallel_per_shard:
+        description: Ghidra processes inside each shard runner
+        type: choice
+        required: true
+        default: "2"
+        options: ["1", "2", "4"]
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  matrix:
+    runs-on: ubuntu-24.04
+    outputs:
+      shards: ${{ steps.make.outputs.shards }}
+    steps:
+      - id: make
+        env:
+          COUNT: ${{ inputs.shard_count }}
+        run: |
+          shards=$(python3 -c 'import json,os; print(json.dumps(list(range(int(os.environ["COUNT"])))))')
+          echo "shards=$shards" >> "$GITHUB_OUTPUT"
+
+  decompile:
+    needs: matrix
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        shard: ${{ fromJSON(needs.matrix.outputs.shards) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    container:
+      image: ghcr.io/dosa42/arm64-elf-suite-decompiler:v9
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    env:
+      EXPECTED_ELF_COUNT: "1923"
+      ELF_SHARD_INDEX: ${{ matrix.shard }}
+      ELF_SHARD_COUNT: ${{ inputs.shard_count }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download and verify original vendor ZIP
+        run: |
+          bash scripts/download_input.sh \
+            '${{ inputs.vendor_zip_url }}' \
+            "$RUNNER_TEMP/vendor-a32.zip" \
+            '${{ inputs.vendor_zip_sha256 }}'
+      - name: Restore prior checkpoint when supplied
+        if: ${{ inputs.checkpoint_url != '' }}
+        run: |
+          bash scripts/download_input.sh '${{ inputs.checkpoint_url }}' "$RUNNER_TEMP/checkpoint.tar.gz" ""
+          bash scripts/restore_checkpoint.sh "$RUNNER_TEMP/checkpoint.tar.gz" "$RUNNER_TEMP/output"
+      - name: Decompile deterministic shard
+        run: |
+          bash scripts/run_decompile_shard.sh \
+            "$RUNNER_TEMP/vendor-a32.zip" \
+            "$RUNNER_TEMP/output" \
+            '${{ inputs.parallel_per_shard }}'
+      - name: Remove disposable input and Ghidra projects
+        if: always()
+        run: |
+          rm -rf "$RUNNER_TEMP/output/.work" "$RUNNER_TEMP/output/ghidra-projects"
+      - name: Upload complete shard evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vendor-decompiled-shard-${{ matrix.shard }}
+          path: ${{ runner.temp }}/output/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 6
+
+  merge:
+    needs: [matrix, decompile]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: vendor-decompiled-shard-*
+          path: shards
+      - name: Require one non-empty plain-text C file for every ELF
+        run: python3 scripts/merge_shards.py --input shards --output reconstructed --expected 1923
+      - name: Package visible plain C reconstruction
+        run: |
+          tar --sort=name --mtime='UTC 2026-01-01' --owner=0 --group=0 --numeric-owner \
+            -I 'zstd -19 -T0' -cf vendor-a32-plain-c.tar.zst -C reconstructed plain-c plain-c-index.json
+          sha256sum vendor-a32-plain-c.tar.zst > vendor-a32-plain-c.tar.zst.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vendor-a32-1923-fully-decompiled-plain-c
+          path: |
+            vendor-a32-plain-c.tar.zst
+            vendor-a32-plain-c.tar.zst.sha256
+            reconstructed/plain-c-index.json
+          if-no-files-found: error
+          retention-days: 30

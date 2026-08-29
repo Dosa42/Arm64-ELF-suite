@@ -73,4 +73,9 @@ arm64-elf-suite/
 
 Ghidra recovers C-like pseudocode, not the exact original source. Optimisation, stripping, macros, comments, formatting, and discarded names cannot be perfectly reconstructed. The debug ELF retains DWARF and symbols specifically to provide the strongest reconstruction available.
 
+## Vendor batch: 1,923 ELF files
+
+`Decompile Vendor ELF Batch` handles the complete `vendor-a32.zip` population through deterministic parallel shards. A full workflow run is successful only when all 1,923 ELF inputs produce a non-empty UTF-8 plain-text C file.
+
+The final success artifact is named `vendor-a32-1923-fully-decompiled-plain-c`. Its `plain-c/` tree mirrors the original vendor paths and appends `.c`, for example `vendor/lib64/libexample.so.c`. Logs, disassembly, partial outputs, or an unresolved function never satisfy the final success gate.
 
