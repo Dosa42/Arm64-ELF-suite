@@ -7,8 +7,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     rm -rf /var/lib/apt/lists/*
 
 COPY vendor-elf-decompiler-tool /opt/vendor-elf-decompiler-tool
-RUN chmod +x /opt/vendor-elf-decompiler-tool/*.sh /opt/vendor-elf-decompiler-tool/*.py && \
-    /opt/vendor-elf-decompiler-tool/install_decompiler_dependencies.sh
 
 ENV GHIDRA_HOME=/opt/vendor-elf-decompiler-tool/.tools/ghidra_12.1.3_PUBLIC
 ENV JAVA_HOME=/opt/vendor-elf-decompiler-tool/.tools/jdk21
@@ -16,5 +14,7 @@ ENV RETDEC_HOME=/opt/vendor-elf-decompiler-tool/.tools/retdec-5.0
 ENV ANGR_PYTHON=/opt/vendor-elf-decompiler-tool/.tools/angr-venv/bin/python
 ENV PATH=/opt/vendor-elf-decompiler-tool/.tools/jdk21/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-WORKDIR /work
+RUN chmod +x /opt/vendor-elf-decompiler-tool/*.sh /opt/vendor-elf-decompiler-tool/*.py && \
+    /opt/vendor-elf-decompiler-tool/install_decompiler_dependencies.sh
 
+WORKDIR /work
