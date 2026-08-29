@@ -1,0 +1,9 @@
+{
+  "name": "hello-arm64",
+  "sources": ["src/main.c"],
+  "include_dirs": ["include"],
+  "defines": ["ELF_SUITE_BUILD=1"],
+  "cflags": ["-Wall", "-Wextra", "-Werror"],
+  "ldflags": []
+}
+
