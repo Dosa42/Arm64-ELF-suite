@@ -65,4 +65,5 @@ fi
 "$install_root/jdk21/bin/javac" -version
 "$install_root/retdec-5.0/bin/retdec-decompiler" --version
 "$install_root/angr-venv/bin/python" -c 'import angr; print("angr", angr.__version__)'
-"$install_root/ghidra_12.1.3_PUBLIC/support/analyzeHeadless" 2>&1 | sed -n '1,3p'
+test -x "$install_root/ghidra_12.1.3_PUBLIC/support/analyzeHeadless"
+echo "Ghidra analyzeHeadless 12.1.3 installed"
